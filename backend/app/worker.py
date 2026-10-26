@@ -20,6 +20,7 @@ MAX_CONSECUTIVE_ENV_FAILURES = 3
 DEFAULT_PKG = "com.jd.healthy.daily"
 DEFAULT_SERIAL = "emulator-5554"
 ROUND_GAP_SECONDS = 0.2
+RUN_META_FIELDS = {"model", "qemu"}
 
 
 def _pump(stream, q: "queue.Queue[Optional[str]]") -> None:
@@ -194,7 +195,7 @@ class RunWorker:
                 db.insert_event(run_id, round_no, event.kind, event.message)
 
             meta = parser.parse_run_meta(line)
-            if meta is not None:
+            if meta is not None and meta[0] in RUN_META_FIELDS:
                 db.update_run(run_id, **{meta[0]: meta[1]})
 
         try:

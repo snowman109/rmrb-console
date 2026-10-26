@@ -54,6 +54,17 @@ def test_round_without_csv_is_partial(tmp_path, monkeypatch):
     assert rows[0]["source"] == "stdout"
 
 
+def test_script_plan_banner_does_not_overwrite_run_plan(tmp_path, monkeypatch):
+    cfg, _ = _cfg(tmp_path)
+    monkeypatch.setattr(worker.emulator, "ensure_emulator", lambda *a, **k: None)
+    db.init_db()
+    run_id = db.create_run(url="u", rounds=1, avd="AVD", serial="emulator-5554",
+                           pkg="p", plan="wipe", sdk_root="/sdk",
+                           script_path=cfg["script_path"], out_dir=str(tmp_path))
+    worker.RunWorker(lambda: cfg).execute(run_id)
+    assert db.get_run(run_id)["plan"] == "wipe"
+
+
 def test_apk_metadata_snapshotted_before_next_round(tmp_path, monkeypatch):
     cfg, _ = _cfg(tmp_path)
     apk = tmp_path / "round1.apk"

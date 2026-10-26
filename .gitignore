@@ -2,6 +2,9 @@
 __pycache__/
 data/app.db*
 data/runs/
+data/config.json
+data/emulator_boot.log
+.pytest_cache/
 frontend/node_modules/
 frontend/dist/
 .superpowers/
