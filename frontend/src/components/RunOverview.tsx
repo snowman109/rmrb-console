@@ -11,21 +11,12 @@ import {
   Tag,
   Typography,
 } from 'antd'
+import { TERMINAL_RUN_STATUSES, runStatusTag } from '../status'
 import type { Run } from '../types'
 
-const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'interrupted'])
 const ENV_FAILURE_STATUSES = [
   'BOOT_FAIL', 'NO_PAGE', 'NO_APK', 'CLICK_FAIL', 'INSTALL_FAIL', 'CSV_MISSING',
 ]
-
-const RUN_TAG: Record<string, { color: string; label: string }> = {
-  queued: { color: 'default', label: '排队中' },
-  running: { color: 'processing', label: '运行中' },
-  succeeded: { color: 'success', label: '已完成' },
-  failed: { color: 'error', label: '已失败' },
-  canceled: { color: 'warning', label: '已取消' },
-  interrupted: { color: 'default', label: '已中断' },
-}
 
 function formatDuration(start: string | null, end: string | null): string {
   if (!start) return '—'
@@ -49,7 +40,7 @@ export function RunOverview({ run, counts, onCancel }: Props) {
   const [, setTick] = useState(0)
 
   useEffect(() => {
-    if (!run || TERMINAL.has(run.status)) return
+    if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return
     const timer = window.setInterval(() => setTick((v) => v + 1), 1000)
     return () => window.clearInterval(timer)
   }, [run])
@@ -61,7 +52,7 @@ export function RunOverview({ run, counts, onCancel }: Props) {
   const done = Object.values(counts).reduce((sum, n) => sum + n, 0)
   const failed = ENV_FAILURE_STATUSES.reduce((sum, key) => sum + (counts[key] ?? 0), 0)
   const percent = run.rounds > 0 ? Math.round((done / run.rounds) * 100) : 0
-  const tag = RUN_TAG[run.status] ?? { color: 'default', label: run.status }
+  const tag = runStatusTag(run.status)
   const active = run.status === 'queued' || run.status === 'running'
 
   return (
