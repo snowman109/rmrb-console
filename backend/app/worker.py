@@ -11,10 +11,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app import db, emulator, parser
+from app.config import data_dir
 
 ROUND_TIMEOUT = 1800
 APK_PATH = "/tmp/avd_rounds/round1.apk"
 EMULATOR_LOG = "/tmp/avd_rounds/emulator_wipe.log"
+MAX_CONSECUTIVE_ENV_FAILURES = 3
+DEFAULT_PKG = "com.jd.healthy.daily"
+DEFAULT_SERIAL = "emulator-5554"
+ROUND_GAP_SECONDS = 0.2
 
 
 def _pump(stream, q: "queue.Queue[Optional[str]]") -> None:
@@ -25,36 +30,127 @@ def _pump(stream, q: "queue.Queue[Optional[str]]") -> None:
         q.put(None)
 
 
+def _file_size(path: str) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
 class RunWorker:
     def __init__(self, config_provider: Callable[[], dict]):
         self.config_provider = config_provider
         self.cancel_event = threading.Event()
         self.last_exit_code: Optional[int] = None
+        self._current_run_id: Optional[int] = None
+        self._queue: "queue.Queue[Optional[int]]" = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
 
-    def cancel(self) -> None:
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._consume, daemon=True)
+        self._thread.start()
+
+    def _consume(self) -> None:
+        while True:
+            run_id = self._queue.get()
+            if run_id is None:
+                return
+            self.execute(run_id)
+
+    def is_busy(self) -> bool:
+        return self._current_run_id is not None or not self._queue.empty()
+
+    def submit(self, url: str, rounds: int, avd: str) -> int:
+        cfg = self.config_provider() or {}
+        run_id = db.create_run(
+            url=url, rounds=rounds, avd=avd,
+            serial=cfg.get("serial") or DEFAULT_SERIAL,
+            pkg=cfg.get("pkg") or DEFAULT_PKG,
+            plan="wipe", sdk_root=cfg.get("sdk_root", ""),
+            script_path=cfg.get("script_path", ""), out_dir="",
+        )
+        out_dir = data_dir() / "runs" / str(run_id)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        db.update_run(run_id, out_dir=str(out_dir))
+        self.start()
+        self._queue.put(run_id)
+        return run_id
+
+    def cancel(self, run_id: int) -> bool:
+        if self._current_run_id != run_id:
+            return False
         self.cancel_event.set()
+        return True
 
     def execute(self, run_id: int) -> None:
         run = db.get_run(run_id)
         if run is None:
             return
         cfg = self.config_provider() or {}
+        self._current_run_id = run_id
+        self.cancel_event.clear()
         db.update_run(run_id, status="running", started_at=db.now_iso())
+
+        sdk_root = run["sdk_root"] or cfg.get("sdk_root", "")
+        emu_offset = _file_size(EMULATOR_LOG)
         status = "succeeded"
+        needs_kill = False
+        streak = 0
         try:
-            sdk_root = run["sdk_root"] or cfg.get("sdk_root", "")
             emulator.ensure_emulator(sdk_root, run["avd"], run["serial"])
             for round_no in range(1, int(run["rounds"]) + 1):
                 if self.cancel_event.is_set():
                     status = "canceled"
+                    needs_kill = True
                     break
-                self._run_round(run_id, round_no, cfg, run)
+                row = self._run_round(run_id, round_no, cfg, run)
+                if parser.is_environment_failure(row.get("status") or ""):
+                    streak += 1
+                else:
+                    streak = 0
+                if streak >= MAX_CONSECUTIVE_ENV_FAILURES:
+                    status = "failed"
+                    needs_kill = True
+                    db.update_run(run_id, error=f"{row.get('status')} x{streak}")
+                    self._skip_remaining(run_id, round_no + 1, int(run["rounds"]))
+                    break
+                if self.cancel_event.is_set():
+                    status = "canceled"
+                    needs_kill = True
+                    break
+                time.sleep(ROUND_GAP_SECONDS)
         except Exception as exc:  # noqa: BLE001 - failure is recorded, not raised
             status = "failed"
             db.update_run(run_id, error=str(exc))
         finally:
             db.update_run(run_id, status=status, finished_at=db.now_iso(),
                           exit_code=self.last_exit_code)
+            if needs_kill:
+                try:
+                    emulator.kill_emulator(sdk_root, run["serial"], run["avd"])
+                except Exception:  # noqa: BLE001 - cleanup must not mask status
+                    pass
+            self._import_emulator_log(run_id, emu_offset)
+            self._current_run_id = None
+
+    def _skip_remaining(self, run_id: int, start: int, total: int) -> None:
+        for round_no in range(start, total + 1):
+            db.upsert_round(run_id, round_no,
+                            {"status": "skipped", "source": "worker"})
+
+    def _import_emulator_log(self, run_id: int, offset: int) -> None:
+        path = Path(EMULATOR_LOG)
+        if not path.exists():
+            return
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            data = fh.read()
+        seq = len(db.list_emulator_log_lines(run_id))
+        for line in data.decode("utf-8", errors="replace").splitlines():
+            seq += 1
+            db.insert_emulator_log_line(run_id, seq, line)
 
     def _run_round(self, run_id: int, round_no: int, cfg: dict, run: dict) -> dict:
         out_csv = Path(run["out_dir"]) / f"round_{round_no}.csv"
