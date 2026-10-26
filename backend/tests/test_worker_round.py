@@ -68,9 +68,9 @@ def test_script_plan_banner_does_not_overwrite_run_plan(tmp_path, monkeypatch):
 def test_apk_metadata_snapshotted_before_next_round(tmp_path, monkeypatch):
     cfg, _ = _cfg(tmp_path)
     apk = tmp_path / "round1.apk"
-    apk.write_bytes(b"x" * 1024)
     monkeypatch.setattr(worker, "APK_PATH", str(apk))
     monkeypatch.setattr(worker.emulator, "ensure_emulator", lambda *a, **k: None)
+    monkeypatch.setenv("FAKE_APK", str(apk))
     db.init_db()
     run_id = db.create_run(url="u", rounds=1, avd="AVD", serial="emulator-5554",
                            pkg="p", plan="wipe", sdk_root="/sdk",
@@ -80,3 +80,30 @@ def test_apk_metadata_snapshotted_before_next_round(tmp_path, monkeypatch):
     assert len(arts) == 1
     assert arts[0]["size"] == 1024
     assert len(arts[0]["sha256"]) == 64
+
+
+def test_stale_apk_from_previous_run_is_not_attributed(tmp_path, monkeypatch):
+    cfg, _ = _cfg(tmp_path)
+    apk = tmp_path / "round1.apk"
+    apk.write_bytes(b"x" * 1024)
+    monkeypatch.setattr(worker, "APK_PATH", str(apk))
+    monkeypatch.setattr(worker.emulator, "ensure_emulator", lambda *a, **k: None)
+    db.init_db()
+    run_id = db.create_run(url="u", rounds=1, avd="AVD", serial="emulator-5554",
+                           pkg="p", plan="wipe", sdk_root="/sdk",
+                           script_path=cfg["script_path"], out_dir=str(tmp_path))
+    worker.RunWorker(lambda: cfg).execute(run_id)
+    assert db.list_apk_artifacts(run_id) == []
+
+
+def test_failed_round_synthesizes_early_exit_event(tmp_path, monkeypatch):
+    cfg, _ = _cfg(tmp_path)
+    monkeypatch.setattr(worker.emulator, "ensure_emulator", lambda *a, **k: None)
+    monkeypatch.setenv("FAKE_STATUS", "NO_PAGE")
+    db.init_db()
+    run_id = db.create_run(url="u", rounds=1, avd="AVD", serial="emulator-5554",
+                           pkg="p", plan="wipe", sdk_root="/sdk",
+                           script_path=cfg["script_path"], out_dir=str(tmp_path))
+    worker.RunWorker(lambda: cfg).execute(run_id)
+    kinds = {e["kind"] for e in db.list_events(run_id)}
+    assert "no_page" in kinds

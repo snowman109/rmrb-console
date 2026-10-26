@@ -185,12 +185,49 @@ def list_runs(limit: int = 50, offset: int = 0) -> List[dict]:
 def mark_interrupted_runs() -> int:
     conn = connect()
     try:
-        cur = conn.execute(
+        finished = now_iso()
+        running = conn.execute(
             "UPDATE runs SET status = 'interrupted', finished_at = ? WHERE status = 'running'",
-            (now_iso(),),
+            (finished,),
+        ).rowcount
+        queued = conn.execute(
+            """UPDATE runs SET status = 'interrupted', finished_at = ?,
+                               error = COALESCE(error, '服务重启时仍在队列中，未开始')
+               WHERE status = 'queued'""",
+            (finished,),
+        ).rowcount
+        conn.commit()
+        return running + queued
+    finally:
+        conn.close()
+
+
+def claim_run(run_id: int, started_at: str) -> bool:
+    """Compare-and-set queued -> running; False when the run left the queue."""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "UPDATE runs SET status = 'running', started_at = ? "
+            "WHERE id = ? AND status = 'queued'",
+            (started_at, run_id),
         )
         conn.commit()
-        return cur.rowcount
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def cancel_queued_run(run_id: int, finished_at: str) -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            """UPDATE runs SET status = 'canceled', finished_at = ?,
+                               error = COALESCE(error, '排队中被取消')
+               WHERE id = ? AND status = 'queued'""",
+            (finished_at, run_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -281,13 +318,15 @@ def count_rounds_by_status(run_id: int) -> Dict[str, int]:
     conn = connect()
     try:
         rows = conn.execute(
-            """SELECT COALESCE(status, 'NULL') AS status, COUNT(*) AS n
-               FROM rounds WHERE run_id = ? GROUP BY 1""",
-            (run_id,),
+            "SELECT status FROM rounds WHERE run_id = ?", (run_id,)
         ).fetchall()
-        return {r["status"]: r["n"] for r in rows}
     finally:
         conn.close()
+    counts: Dict[str, int] = {}
+    for row in rows:
+        code = (row["status"] or "NULL").split(":", 1)[0]
+        counts[code] = counts.get(code, 0) + 1
+    return counts
 
 
 def insert_apk_artifact(run_id: int, round_no: Optional[int], path: str,

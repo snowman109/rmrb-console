@@ -21,6 +21,26 @@ DEFAULT_PKG = "com.jd.healthy.daily"
 DEFAULT_SERIAL = "emulator-5554"
 ROUND_GAP_SECONDS = 0.2
 RUN_META_FIELDS = {"model", "qemu"}
+BOOT_WATCH_INTERVAL = 10
+EARLY_EXIT_EVENT_KINDS = {
+    "BOOT_FAIL": "boot_fail",
+    "NO_PAGE": "no_page",
+    "NO_APK": "no_apk",
+    "CLICK_FAIL": "click_fail",
+    "INSTALL_FAIL": "install_fail",
+}
+
+
+class PortDriftError(RuntimeError):
+    pass
+
+
+def _file_state(path: str):
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _pump(stream, q: "queue.Queue[Optional[str]]") -> None:
@@ -80,19 +100,22 @@ class RunWorker:
         return run_id
 
     def cancel(self, run_id: int) -> bool:
-        if self._current_run_id != run_id:
-            return False
-        self.cancel_event.set()
-        return True
+        if self._current_run_id == run_id:
+            self.cancel_event.set()
+            return True
+        return db.cancel_queued_run(run_id, db.now_iso())
 
     def execute(self, run_id: int) -> None:
         run = db.get_run(run_id)
-        if run is None:
+        if run is None or run["status"] != "queued":
             return
         cfg = self.config_provider() or {}
-        self._current_run_id = run_id
         self.cancel_event.clear()
-        db.update_run(run_id, status="running", started_at=db.now_iso())
+        self._current_run_id = run_id
+        self.last_exit_code = None
+        if not db.claim_run(run_id, db.now_iso()):
+            self._current_run_id = None
+            return
 
         sdk_root = run["sdk_root"] or cfg.get("sdk_root", "")
         emu_offset = _file_size(EMULATOR_LOG)
@@ -100,13 +123,21 @@ class RunWorker:
         needs_kill = False
         streak = 0
         try:
-            emulator.ensure_emulator(sdk_root, run["avd"], run["serial"])
+            emulator.ensure_emulator(sdk_root, run["avd"], run["serial"],
+                                     cancel_event=self.cancel_event)
             for round_no in range(1, int(run["rounds"]) + 1):
                 if self.cancel_event.is_set():
                     status = "canceled"
                     needs_kill = True
                     break
-                row = self._run_round(run_id, round_no, cfg, run)
+                try:
+                    row = self._run_round(run_id, round_no, cfg, run)
+                except PortDriftError as exc:
+                    status = "failed"
+                    needs_kill = True
+                    db.update_run(run_id, error=str(exc))
+                    self._skip_remaining(run_id, round_no + 1, int(run["rounds"]))
+                    break
                 if parser.is_environment_failure(row.get("status") or ""):
                     streak += 1
                 else:
@@ -122,6 +153,9 @@ class RunWorker:
                     needs_kill = True
                     break
                 time.sleep(ROUND_GAP_SECONDS)
+        except emulator.EmulatorCanceled:
+            status = "canceled"
+            needs_kill = True
         except Exception as exc:  # noqa: BLE001 - failure is recorded, not raised
             status = "failed"
             db.update_run(run_id, error=str(exc))
@@ -160,6 +194,7 @@ class RunWorker:
 
         seq = len(db.list_log_lines(run_id))
         events: List[parser.Event] = []
+        apk_before = _file_state(APK_PATH)
         proc = subprocess.Popen(
             [sys.executable, cfg["script_path"]],
             cwd=str(Path(cfg["script_path"]).parent),
@@ -168,8 +203,21 @@ class RunWorker:
         )
         q: "queue.Queue[Optional[str]]" = queue.Queue()
         threading.Thread(target=_pump, args=(proc.stdout, q), daemon=True).start()
+        try:
+            return self._read_round(proc, q, run, run_id, round_no, out_csv,
+                                    seq, events, apk_before)
+        except BaseException:
+            self._terminate(proc)
+            raise
 
+    def _read_round(self, proc: subprocess.Popen, q: "queue.Queue[Optional[str]]",
+                    run: dict, run_id: int, round_no: int, out_csv: Path,
+                    seq: int, events: List[parser.Event], apk_before) -> dict:
+        serial = run["serial"]
+        sdk_root = run["sdk_root"]
         started = time.time()
+        last_watch = started
+        watch_boot = False
         timed_out = False
         while True:
             if self.cancel_event.is_set():
@@ -179,6 +227,21 @@ class RunWorker:
                 timed_out = True
                 self._terminate(proc)
                 break
+            if watch_boot and time.time() - last_watch >= BOOT_WATCH_INTERVAL:
+                last_watch = time.time()
+                if emulator.device_booted(sdk_root, serial):
+                    watch_boot = False
+                else:
+                    others = emulator._emulator_serials(sdk_root)
+                    if (others and serial not in others
+                            and not emulator.device_present(sdk_root, serial)):
+                        self._terminate(proc)
+                        drift = others[0]
+                        db.insert_event(run_id, round_no, "port_drift",
+                                        f"expected {serial}, found {drift}")
+                        db.upsert_round(run_id, round_no,
+                                        self._partial_row(events, "BOOT_FAIL"))
+                        raise PortDriftError(f"expected {serial}, found {drift}")
             try:
                 line = q.get(timeout=1)
             except queue.Empty:
@@ -193,6 +256,9 @@ class RunWorker:
             if event is not None:
                 events.append(event)
                 db.insert_event(run_id, round_no, event.kind, event.message)
+                if event.kind == "cold_boot":
+                    watch_boot = True
+                    last_watch = time.time()
 
             meta = parser.parse_run_meta(line)
             if meta is not None and meta[0] in RUN_META_FIELDS:
@@ -218,13 +284,23 @@ class RunWorker:
             row = self._partial_row(events)
 
         db.upsert_round(run_id, round_no, row)
-        self._snapshot_apk(run_id, round_no)
+        self._record_early_exit_event(run_id, round_no, row.get("status"))
+        self._snapshot_apk(run_id, round_no, apk_before)
         return row
 
-    def _partial_row(self, events: List[parser.Event]) -> Dict[str, Any]:
+    def _record_early_exit_event(self, run_id: int, round_no: int,
+                                 status: Optional[str]) -> None:
+        if not status:
+            return
+        kind = EARLY_EXIT_EVENT_KINDS.get(status.split(":", 1)[0])
+        if kind:
+            db.insert_event(run_id, round_no, kind, status)
+
+    def _partial_row(self, events: List[parser.Event],
+                     status: str = "CSV_MISSING") -> Dict[str, Any]:
         row: Dict[str, Any] = {name: None for name in parser.CSV_COLUMNS}
         row["action"] = "wipe"
-        row["status"] = "CSV_MISSING"
+        row["status"] = status
         row["source"] = "stdout"
         for event in events:
             if event.kind == "android_id":
@@ -239,9 +315,11 @@ class RunWorker:
                 row["channel"] = channel or None
         return row
 
-    def _snapshot_apk(self, run_id: int, round_no: int) -> None:
+    def _snapshot_apk(self, run_id: int, round_no: int, before=None) -> None:
         path = Path(APK_PATH)
         if not path.exists():
+            return
+        if before is not None and _file_state(APK_PATH) == before:
             return
         digest = hashlib.sha256()
         with path.open("rb") as fh:

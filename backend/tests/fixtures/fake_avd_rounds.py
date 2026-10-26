@@ -15,6 +15,10 @@ print("  host download ok: 81587534 bytes")
 print("  pm install ...")
 print("    app tap: 同意")
 print("  channel: wdb-ltt | status: " + status)
+apk = os.environ.get("FAKE_APK")
+if apk:
+    with open(apk, "wb") as fh:
+        fh.write(b"x" * 1024)
 csv.writer(open(out, "w", newline="", encoding="utf-8")).writerow([
     "round", "reset", "android_id_before", "android_id_after", "public_ip",
     "clicked_at", "click_url", "apk_url", "install_at", "open_at", "installer",

@@ -27,9 +27,15 @@ const ROUND_STATUS_COLOR: Record<string, string> = {
   skipped: 'default',
 }
 
+export function roundStatusCode(status: string | null | undefined): string {
+  if (!status) return ''
+  return status.split(':', 1)[0]
+}
+
 export function roundStatusColor(status: string | null | undefined): string {
-  if (!status) return 'default'
-  return ROUND_STATUS_COLOR[status] ?? 'default'
+  const code = roundStatusCode(status)
+  if (!code) return 'default'
+  return ROUND_STATUS_COLOR[code] ?? 'default'
 }
 
 export function runStatusTag(status: string): { color: string; label: string } {

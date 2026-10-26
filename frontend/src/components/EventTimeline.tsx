@@ -15,8 +15,11 @@ const KIND_LABEL: Record<string, string> = {
   host_download_fail: '宿主机下载失败（回退 Chrome）',
   install_attempt: '安装尝试',
   channel_status: '渠道状态',
+  boot_fail: '模拟器启动失败',
   no_page: '未打开页面',
   no_apk: '未拿到 APK',
+  install_fail: '安装失败',
+  port_drift: '模拟器端口漂移',
   timeout: '轮次超时',
   canceled: '已取消',
 }
@@ -27,8 +30,11 @@ const KIND_COLOR: Record<string, string> = {
   channel_status: 'blue',
   click_fail: 'red',
   host_download_fail: 'red',
+  boot_fail: 'red',
   no_page: 'red',
   no_apk: 'red',
+  install_fail: 'red',
+  port_drift: 'red',
   timeout: 'red',
 }
 

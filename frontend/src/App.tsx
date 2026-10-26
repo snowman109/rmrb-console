@@ -138,7 +138,7 @@ export default function App() {
               </Card>
 
               <Card title="轮次明细">
-                <RoundsTable rounds={rounds} />
+                <RoundsTable rounds={rounds} events={events} />
               </Card>
 
               <Card title="事件时间线">

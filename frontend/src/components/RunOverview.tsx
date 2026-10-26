@@ -54,6 +54,7 @@ export function RunOverview({ run, counts, onCancel }: Props) {
   const percent = run.rounds > 0 ? Math.round((done / run.rounds) * 100) : 0
   const tag = runStatusTag(run.status)
   const active = run.status === 'queued' || run.status === 'running'
+  const cancellable = run.status === 'running'
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -65,10 +66,14 @@ export function RunOverview({ run, counts, onCancel }: Props) {
         <Typography.Text type="secondary">
           {run.avd} · {run.serial} · {run.model ?? 'model 未知'}
         </Typography.Text>
-        <Button danger size="small" disabled={!active} onClick={onCancel}>
+        <Button danger size="small" disabled={!cancellable} onClick={onCancel}>
           取消
         </Button>
-        <Typography.Text type="secondary">取消后不能续跑</Typography.Text>
+        <Typography.Text type="secondary">
+          {run.status === 'queued'
+            ? '排队中的运行不能取消，等它开始后再说'
+            : '取消后不能续跑'}
+        </Typography.Text>
       </Space>
 
       {run.error && <Alert type="error" showIcon message={run.error} />}
