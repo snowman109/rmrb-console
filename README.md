@@ -30,14 +30,31 @@ pip install -r backend/requirements.txt
 cd frontend && npm install && cd ..
 ```
 
-## 构建前端并启动
+## 启动（一键）
+
+```bash
+./start.sh
+```
+
+已在跑就先停再起，所以同一条命令就是重启。前端源码比 `dist` 新时自动重新构建。
+
+| 命令 | 作用 |
+|------|------|
+| `./start.sh` | 启动 / 重启 |
+| `./start.sh stop` | 停止（连同它拉起的 `avd_rounds.py` 一起收掉，避免残留一个还在抹机器的孤儿进程） |
+| `./start.sh status` | 是否在跑、健康检查、有无残留脚本 |
+| `./start.sh logs` | 跟踪 `data/server.log` |
+| `./start.sh --no-build` | 跳过前端构建 |
+| `./start.sh --port 9000` | 换端口（也可用 `PORT=9000 ./start.sh`） |
+
+打开 <http://127.0.0.1:8787>。
+
+手动等价命令（`./start.sh` 内部就是这些）：
 
 ```bash
 cd frontend && npm run build && cd ..
 python3 -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8787
 ```
-
-打开 <http://127.0.0.1:8787>。
 
 前端热更新开发模式：终端 A 跑上面的 uvicorn，终端 B：
 

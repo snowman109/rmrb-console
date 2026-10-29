@@ -4,6 +4,8 @@ data/app.db*
 data/runs/
 data/config.json
 data/emulator_boot.log
+data/server.log
+data/.server.pid
 .pytest_cache/
 frontend/node_modules/
 frontend/dist/
